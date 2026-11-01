@@ -1,0 +1,114 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "description": "CityPark RAG evaluation dataset — 15 questions spanning all 6 knowledge documents",
+    "k": 4
+  },
+  "queries": [
+    {
+      "query_id": "q01",
+      "question": "How many parking spaces does CityPark have in total?",
+      "relevant_doc_ids": ["facility_overview"],
+      "expected_keywords": ["850", "spaces"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q02",
+      "question": "What is the address and postcode of the car park?",
+      "relevant_doc_ids": ["location_directions"],
+      "expected_keywords": ["Central Plaza", "CC1"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q03",
+      "question": "What is the speed limit inside CityPark?",
+      "relevant_doc_ids": ["rules_policies"],
+      "expected_keywords": ["5", "mph"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q04",
+      "question": "Does CityPark have electric vehicle charging points?",
+      "relevant_doc_ids": ["facilities_amenities", "facility_overview"],
+      "expected_keywords": ["EV", "charging", "40"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q05",
+      "question": "How do I make a parking reservation at CityPark?",
+      "relevant_doc_ids": ["reservation_guide"],
+      "expected_keywords": ["reservation", "book", "name"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q06",
+      "question": "Are there parking spaces for disabled drivers?",
+      "relevant_doc_ids": ["facility_overview", "facilities_amenities"],
+      "expected_keywords": ["disabled", "Blue Badge", "50"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q07",
+      "question": "What payment methods are accepted at the pay stations?",
+      "relevant_doc_ids": ["facilities_amenities", "faq"],
+      "expected_keywords": ["card", "cash", "contactless"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q08",
+      "question": "How far in advance can I book a parking space?",
+      "relevant_doc_ids": ["reservation_guide"],
+      "expected_keywords": ["90", "days"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q09",
+      "question": "What happens if I lose my entry ticket?",
+      "relevant_doc_ids": ["faq"],
+      "expected_keywords": ["lost", "ticket", "fee"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q10",
+      "question": "What is the maximum vehicle height allowed to enter?",
+      "relevant_doc_ids": ["location_directions", "faq", "facility_overview"],
+      "expected_keywords": ["2.1", "metres", "height"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q11",
+      "question": "Are there baby changing facilities at CityPark?",
+      "relevant_doc_ids": ["facilities_amenities"],
+      "expected_keywords": ["baby", "changing"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q12",
+      "question": "What is the fine for parking without paying?",
+      "relevant_doc_ids": ["rules_policies"],
+      "expected_keywords": ["85", "PCN", "Parking Charge Notice"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q13",
+      "question": "How long after charging finishes can I stay in an EV bay?",
+      "relevant_doc_ids": ["rules_policies"],
+      "expected_keywords": ["30", "minutes", "EV"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q14",
+      "question": "Can motorcycles park at CityPark and where?",
+      "relevant_doc_ids": ["facility_overview", "rules_policies"],
+      "expected_keywords": ["motorcycle", "Ground Floor", "Zone A"],
+      "category": "general_faq"
+    },
+    {
+      "query_id": "q15",
+      "question": "How do I cancel a parking reservation and get a refund?",
+      "relevant_doc_ids": ["reservation_guide"],
+      "expected_keywords": ["cancel", "refund", "24 hours"],
+      "category": "general_faq"
+    }
+  ]
+}
