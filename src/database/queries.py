@@ -447,6 +447,26 @@ def get_reservation_by_id(
     return dict(row) if row else None
 
 
+def get_pending_exports(db_path: Path | None = None) -> list[dict]:
+    """
+    Return confirmed reservations whose export has not yet completed.
+
+    Includes both NULL (never attempted) and 'EXPORTING' (in progress or
+    crashed before DB commit).  Used by admin_app.py to show the Retry
+    Export button.
+    """
+    with _connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM reservations
+            WHERE status = 'confirmed'
+              AND (exported_at IS NULL OR exported_at = 'EXPORTING')
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+
 def get_reservations_for_reg(
     vehicle_reg: str,
     db_path: Path | None = None,

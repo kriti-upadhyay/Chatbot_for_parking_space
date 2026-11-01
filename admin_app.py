@@ -161,6 +161,7 @@ def _render_reservations():
                     if st.button("✅ Approve", key=f"approve_{rid}",
                                  use_container_width=True, type="primary"):
                         from src.database.queries import approve_reservation
+                        from src.mcp_server.client import call_write_approval_record
                         result = approve_reservation(
                             rid,
                             admin_id=st.session_state.get("admin_id", "admin"),
@@ -169,6 +170,15 @@ def _render_reservations():
                         if result["success"]:
                             st.success(f"Reservation #{rid} approved.")
                             logger.info("Admin approved reservation %d", rid)
+                            # Export record via MCP tool
+                            export = call_write_approval_record(rid)
+                            if not export.get("success"):
+                                err = export.get("error", "unknown")
+                                st.warning(
+                                    f"Reservation #{rid} approved, but the export "
+                                    f"log could not be written ({err}). "
+                                    "Use the Retry Export button below to try again."
+                                )
                         else:
                             err = result.get("error", "unknown")
                             if err == "already_decided":
@@ -209,6 +219,24 @@ def _render_reservations():
                                 else:
                                     st.error(f"Rejection failed: {err}")
                             st.rerun()
+
+            # Retry Export button — shown for confirmed reservations with failed/missing export
+            if status == "confirmed":
+                exported_at = r.get("exported_at")
+                if exported_at is None or exported_at == "EXPORTING":
+                    st.divider()
+                    st.caption("⚠️ Export to approval log has not completed.")
+                    if st.button("🔄 Retry Export", key=f"retry_export_{rid}",
+                                 use_container_width=True):
+                        from src.mcp_server.client import call_write_approval_record
+                        export = call_write_approval_record(rid)
+                        if export.get("success"):
+                            st.success(f"Reservation #{rid} exported successfully.")
+                        elif export.get("already_exported"):
+                            st.info("Already exported.")
+                        else:
+                            st.error(f"Export failed: {export.get('error', 'unknown')}")
+                        st.rerun()
 
 
 # ---------------------------------------------------------------------------

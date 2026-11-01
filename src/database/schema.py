@@ -86,7 +86,8 @@ CREATE TABLE IF NOT EXISTS reservations (
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S','now')),
     admin_notes     TEXT,
     decided_at      TEXT,
-    decided_by      TEXT
+    decided_by      TEXT,
+    exported_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_res_type_status
     ON reservations(vehicle_type, status);
@@ -94,11 +95,13 @@ CREATE INDEX IF NOT EXISTS idx_res_reg
     ON reservations(vehicle_reg);
 """
 
-# Columns added in Stage 2 — used by the migration for existing databases.
-_STAGE2_COLUMNS = [
+# Columns added after initial release — used by _migrate_reservations for
+# existing databases.  Add new columns here; never remove old ones.
+_MIGRATION_COLUMNS = [
     ("admin_notes", "TEXT"),
     ("decided_at",  "TEXT"),
     ("decided_by",  "TEXT"),
+    ("exported_at", "TEXT"),   # Stage 3: 'EXPORTING' | ISO timestamp | NULL
 ]
 
 # ---------------------------------------------------------------------------
@@ -269,7 +272,7 @@ def _migrate_reservations(conn: sqlite3.Connection) -> None:
         row[1]
         for row in conn.execute("PRAGMA table_info(reservations)").fetchall()
     }
-    for col_name, col_type in _STAGE2_COLUMNS:
+    for col_name, col_type in _MIGRATION_COLUMNS:
         if col_name not in existing_cols:
             conn.execute(
                 f"ALTER TABLE reservations ADD COLUMN {col_name} {col_type}"
