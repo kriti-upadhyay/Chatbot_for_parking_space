@@ -1,19 +1,19 @@
 """
 LangGraph graph assembly.
 
-Wires all nodes into a compiled StateGraph and exposes ``build_graph()``.
+Graph topology (Stage 2):
 
-Graph topology:
   START
-    └─► guardrail_node
-          └─► intent_router_node  (if not blocked)
-                ├─► rag_node       (general_faq)
-                ├─► sql_node       (dynamic_info)
-                └─► reservation_node  (reservation | reservation_input)
-                      each → END
+    └─► status_check_node           (Stage 2: notify user of admin decision)
+          ├─► END                    (if a notification was just delivered)
+          └─► guardrail_node
+                └─► intent_router_node  (if not blocked)
+                      ├─► rag_node       (general_faq)
+                      ├─► sql_node       (dynamic_info)
+                      └─► reservation_node  (reservation | reservation_input)
+                            each → END
 
-A blocked input (injection detected) goes: guardrail_node → END directly,
-skipping the router entirely.
+A blocked input (injection detected) goes guardrail_node → END directly.
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -24,6 +24,7 @@ from src.chatbot.nodes import (
     make_rag_node,
     reservation_node,
     sql_node,
+    status_check_node,
 )
 from src.chatbot.router import route_intent
 from src.chatbot.state import ConversationState
@@ -32,11 +33,17 @@ from src.config import get_logger
 logger = get_logger(__name__)
 
 
+def _after_status_check(state: ConversationState) -> str:
+    """
+    Route to END if status_check_node just delivered a notification this turn
+    (it sets intent='status_notified').  Otherwise proceed to the guardrail.
+    """
+    if state.get("intent") == "status_notified":
+        return END
+    return "guardrail_node"
+
+
 def _after_guardrail(state: ConversationState) -> str:
-    """
-    Conditional edge: if the guardrail blocked the input, go to END;
-    otherwise proceed to the intent router.
-    """
     if state.get("intent") == "blocked":
         return END
     return "intent_router_node"
@@ -61,30 +68,29 @@ def build_graph(rag_chain=None):
 
     rag_node = make_rag_node(rag_chain)
 
-    # ── Build graph ──────────────────────────────────────────────────────────
     builder = StateGraph(ConversationState)
 
-    # Register nodes
+    builder.add_node("status_check_node",  status_check_node)
     builder.add_node("guardrail_node",     guardrail_node)
     builder.add_node("intent_router_node", intent_router_node)
     builder.add_node("rag_node",           rag_node)
     builder.add_node("sql_node",           sql_node)
     builder.add_node("reservation_node",   reservation_node)
 
-    # Entry point
-    builder.add_edge(START, "guardrail_node")
+    builder.add_edge(START, "status_check_node")
 
-    # After guardrail: either go to router or END (if blocked)
+    builder.add_conditional_edges(
+        "status_check_node",
+        _after_status_check,
+        {"guardrail_node": "guardrail_node", END: END},
+    )
+
     builder.add_conditional_edges(
         "guardrail_node",
         _after_guardrail,
-        {
-            "intent_router_node": "intent_router_node",
-            END: END,
-        },
+        {"intent_router_node": "intent_router_node", END: END},
     )
 
-    # After router: dispatch to the appropriate handler node
     builder.add_conditional_edges(
         "intent_router_node",
         route_intent,
@@ -95,7 +101,6 @@ def build_graph(rag_chain=None):
         },
     )
 
-    # All handler nodes lead to END
     builder.add_edge("rag_node",         END)
     builder.add_edge("sql_node",         END)
     builder.add_edge("reservation_node", END)

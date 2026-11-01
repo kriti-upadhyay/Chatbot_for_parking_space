@@ -83,13 +83,23 @@ CREATE TABLE IF NOT EXISTS reservations (
     end_datetime    TEXT    NOT NULL,
     status          TEXT    NOT NULL DEFAULT 'pending'
                             CHECK(status IN ('pending','confirmed','cancelled','rejected','expired')),
-    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S','now'))
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S','now')),
+    admin_notes     TEXT,
+    decided_at      TEXT,
+    decided_by      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_res_type_status
     ON reservations(vehicle_type, status);
 CREATE INDEX IF NOT EXISTS idx_res_reg
     ON reservations(vehicle_reg);
 """
+
+# Columns added in Stage 2 — used by the migration for existing databases.
+_STAGE2_COLUMNS = [
+    ("admin_notes", "TEXT"),
+    ("decided_at",  "TEXT"),
+    ("decided_by",  "TEXT"),
+]
 
 # ---------------------------------------------------------------------------
 # Seed data
@@ -189,6 +199,7 @@ def initialise_database(db_path: Path | None = None) -> None:
         _create_tables(conn)
         _seed_data(conn)
         _reset_availability_to_total(conn)
+        _migrate_reservations(conn)
         conn.commit()
         logger.info("Database initialised successfully.")
     except Exception:
@@ -244,3 +255,23 @@ def _reset_availability_to_total(conn: sqlite3.Connection) -> None:
         "UPDATE parking_availability SET available_spaces = total_spaces"
         " WHERE available_spaces != total_spaces"
     )
+
+
+def _migrate_reservations(conn: sqlite3.Connection) -> None:
+    """
+    Safe, idempotent migration for existing databases.
+
+    Adds Stage 2 admin-decision columns to the reservations table if they
+    are not already present.  Existing rows keep NULL for the new columns,
+    which is correct — they were decided before Stage 2 was deployed.
+    """
+    existing_cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(reservations)").fetchall()
+    }
+    for col_name, col_type in _STAGE2_COLUMNS:
+        if col_name not in existing_cols:
+            conn.execute(
+                f"ALTER TABLE reservations ADD COLUMN {col_name} {col_type}"
+            )
+            logger.info("Migration: added column '%s' to reservations.", col_name)

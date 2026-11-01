@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # ── RAG ──────────────────────────────────────────────────────────────────
     retrieval_k: int = Field(default=4, alias="RETRIEVAL_K")
 
+    # ── Admin ─────────────────────────────────────────────────────────────────
+    # Hashed with bcrypt at runtime; never stored or logged in plaintext.
+    admin_password: str = Field(default="", alias="ADMIN_PASSWORD")
+
     # ── Logging ──────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 

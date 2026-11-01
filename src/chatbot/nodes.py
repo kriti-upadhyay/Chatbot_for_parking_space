@@ -42,6 +42,74 @@ logger = get_logger(__name__)
 # Guardrail node
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Status check node (Stage 2)
+# ---------------------------------------------------------------------------
+
+def status_check_node(state: ConversationState) -> dict:
+    """
+    Check whether the admin has decided on the user's pending reservation.
+
+    Runs on every turn BEFORE the guardrail so the user is notified as
+    soon as they send any message after a decision is made.
+
+    Notification is delivered exactly once — after delivery,
+    ``pending_reservation_id`` is cleared to None.
+
+    Returns an empty dict (no changes) if:
+    - there is no pending reservation being tracked, or
+    - the reservation is still pending (no decision yet).
+    """
+    rid = state.get("pending_reservation_id")
+    if rid is None:
+        # Reset intent so a stale value from the previous turn never persists.
+        return {"intent": None}
+
+    from src.database.queries import get_reservation_status
+
+    status_info = get_reservation_status(rid)
+    if status_info is None or status_info["status"] == "pending":
+        return {"intent": None}
+
+    status   = status_info["status"]
+    notes    = status_info.get("admin_notes") or ""
+    decided_by = status_info.get("decided_by") or "the administrator"
+
+    if status == "confirmed":
+        notification = (
+            f"✅ **Good news!** Your reservation (#{rid}) has been "
+            f"**approved** by {decided_by}.\n"
+            + (f"Note from administrator: {notes}\n" if notes else "")
+            + "You can proceed to CityPark on your reserved date."
+        )
+    elif status == "rejected":
+        notification = (
+            f"❌ We're sorry — your reservation (#{rid}) has been "
+            f"**declined** by {decided_by}.\n"
+            + (f"Reason: {notes}\n" if notes else "")
+            + "Please contact CityPark on 0800 123 4567 if you have questions."
+        )
+    else:
+        # cancelled / expired — inform but don't treat as pending any more
+        notification = (
+            f"ℹ️ Your reservation (#{rid}) is no longer active "
+            f"(status: {status}). "
+            "Please contact CityPark on 0800 123 4567 for assistance."
+        )
+
+    logger.info(
+        "Delivering one-time status notification for reservation %d: %s",
+        rid, status,
+    )
+
+    return {
+        "pending_reservation_id": None,    # clear — notification delivered once
+        "intent": "status_notified",       # signal to router → go to END
+        "response": notification,
+        "messages": [AIMessage(content=notification)],
+    }
+
+
 def guardrail_node(state: ConversationState) -> dict:
     """
     Input safety gate — runs on every user message before routing.
@@ -491,13 +559,15 @@ def reservation_node(state: ConversationState) -> dict:
         )
 
         if save_result["success"]:
-            confirmation = _build_confirmation(reservation, save_result["reservation_id"])
+            rid = save_result["reservation_id"]
+            confirmation = _build_confirmation(reservation, rid)
             return {
                 "response": confirmation,
                 "reservation": reservation,
                 "reservation_active": False,
                 "next_field_to_ask": None,
                 "validation_errors": [],
+                "pending_reservation_id": rid,   # tracked for status polling
                 "messages": [AIMessage(content=confirmation)],
             }
 
