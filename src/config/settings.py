@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     # ── RAG ──────────────────────────────────────────────────────────────────
     retrieval_k: int = Field(default=4, alias="RETRIEVAL_K")
 
+    # ── Admin ─────────────────────────────────────────────────────────────────
+    admin_password: str = Field(default="", alias="ADMIN_PASSWORD")
+
+    # ── MCP (Stage 3) ─────────────────────────────────────────────────────────
+    # Separate random secret used to sign time-based MCP auth tokens.
+    # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    # Must NOT be derived from or equal to ADMIN_PASSWORD.
+    mcp_shared_secret: str = Field(default="", alias="MCP_SHARED_SECRET")
+
     # ── Logging ──────────────────────────────────────────────────────────────
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -85,6 +94,14 @@ class Settings(BaseSettings):
     @property
     def reports_dir(self) -> Path:
         return BASE_DIR / "reports"
+
+    @property
+    def approval_log_file(self) -> Path:
+        import os
+        custom = os.environ.get("APPROVAL_LOG_FILE", "").strip()
+        if custom:
+            return Path(custom)
+        return BASE_DIR / "storage" / "approved_reservations.txt"
 
     def ensure_directories(self) -> None:
         """Create all required runtime directories if they do not exist."""

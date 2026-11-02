@@ -447,6 +447,26 @@ def get_reservation_by_id(
     return dict(row) if row else None
 
 
+def get_pending_exports(db_path: Path | None = None) -> list[dict]:
+    """
+    Return confirmed reservations whose export has not yet completed.
+
+    Includes both NULL (never attempted) and 'EXPORTING' (in progress or
+    crashed before DB commit).  Used by admin_app.py to show the Retry
+    Export button.
+    """
+    with _connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM reservations
+            WHERE status = 'confirmed'
+              AND (exported_at IS NULL OR exported_at = 'EXPORTING')
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+
 def get_reservations_for_reg(
     vehicle_reg: str,
     db_path: Path | None = None,
@@ -458,3 +478,225 @@ def get_reservations_for_reg(
             (vehicle_reg.upper(),),
         ).fetchall()
     return _rows_to_dicts(rows)
+
+
+# ---------------------------------------------------------------------------
+# Admin query functions (Stage 2)
+# ---------------------------------------------------------------------------
+
+def get_pending_reservations(db_path: Path | None = None) -> list[dict]:
+    """
+    Return all reservations with status='pending', newest first.
+
+    Used by the admin dashboard to list items awaiting a decision.
+    """
+    with _connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM reservations WHERE status = 'pending'"
+            " ORDER BY created_at DESC"
+        ).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_all_reservations(
+    status: str | None = None,
+    db_path: Path | None = None,
+) -> list[dict]:
+    """
+    Return reservations, optionally filtered by *status*.
+
+    Args:
+        status: One of pending | confirmed | cancelled | rejected | expired.
+                If None, all reservations are returned.
+
+    Returns:
+        List of reservation dicts ordered by created_at descending.
+    """
+    with _connection(db_path) as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM reservations WHERE status = ? ORDER BY created_at DESC",
+                (status.lower(),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM reservations ORDER BY created_at DESC"
+            ).fetchall()
+    return _rows_to_dicts(rows)
+
+
+def get_reservation_status(
+    reservation_id: int,
+    db_path: Path | None = None,
+) -> dict | None:
+    """
+    Return status fields for a single reservation, or None if not found.
+
+    Returns only the fields needed for user-side polling:
+    id, status, admin_notes, decided_at, decided_by.
+    """
+    with _connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, status, admin_notes, decided_at, decided_by"
+            " FROM reservations WHERE id = ?",
+            (reservation_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def approve_reservation(
+    reservation_id: int,
+    admin_id: str,
+    notes: str = "",
+    db_path: Path | None = None,
+) -> dict:
+    """
+    Approve a pending reservation atomically.
+
+    Steps (inside BEGIN IMMEDIATE):
+      1. Verify the reservation exists and is still 'pending'.
+      2. Re-check that the vehicle type still has capacity
+         (guards against edge cases where capacity changed after save).
+      3. Update status → 'confirmed'; record admin_id, notes, timestamp.
+
+    Returns:
+        dict with keys: success (bool), error (str | None).
+        error values: 'not_found', 'already_decided', 'capacity_exceeded',
+                      'db_error'.
+    """
+    path = db_path or settings.db_path
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        # 1. Fetch the reservation.
+        row = conn.execute(
+            "SELECT * FROM reservations WHERE id = ?", (reservation_id,)
+        ).fetchone()
+
+        if row is None:
+            conn.rollback()
+            return {"success": False, "error": "not_found"}
+
+        if row["status"] != "pending":
+            conn.rollback()
+            return {"success": False, "error": "already_decided",
+                    "current_status": row["status"]}
+
+        vehicle_type = row["vehicle_type"]
+
+        # 2. Re-verify capacity.
+        vc = conn.execute(
+            "SELECT total_spaces FROM vehicle_capacity WHERE vehicle_type = ?",
+            (vehicle_type,),
+        ).fetchone()
+
+        if vc is None:
+            conn.rollback()
+            return {"success": False, "error": "invalid_vehicle_type"}
+
+        booked = conn.execute(
+            "SELECT COUNT(*) FROM reservations"
+            " WHERE vehicle_type = ? AND status IN ('pending','confirmed')",
+            (vehicle_type,),
+        ).fetchone()[0]
+
+        # The reservation being approved is already in the booked count as
+        # 'pending'.  If booked > total_spaces something went wrong externally.
+        if booked > vc["total_spaces"]:
+            conn.rollback()
+            return {"success": False, "error": "capacity_exceeded"}
+
+        # 3. Confirm.
+        conn.execute(
+            """
+            UPDATE reservations
+            SET status     = 'confirmed',
+                admin_notes = ?,
+                decided_at  = strftime('%Y-%m-%d %H:%M:%S','now'),
+                decided_by  = ?
+            WHERE id = ?
+            """,
+            (notes, admin_id, reservation_id),
+        )
+        conn.commit()
+
+        logger.info(
+            "Reservation %d approved by %s.", reservation_id, admin_id
+        )
+        return {"success": True, "error": None}
+
+    except sqlite3.Error:
+        conn.rollback()
+        logger.exception("approve_reservation DB error for id=%d", reservation_id)
+        return {"success": False, "error": "db_error"}
+    finally:
+        conn.close()
+
+
+def reject_reservation(
+    reservation_id: int,
+    admin_id: str,
+    reason: str,
+    db_path: Path | None = None,
+) -> dict:
+    """
+    Reject a pending reservation atomically.
+
+    Steps (inside BEGIN IMMEDIATE):
+      1. Verify the reservation exists and is still 'pending'.
+      2. Update status → 'rejected'; record admin_id, reason, timestamp.
+
+    Returns:
+        dict with keys: success (bool), error (str | None).
+        error values: 'not_found', 'already_decided', 'db_error'.
+    """
+    if not reason or not reason.strip():
+        return {"success": False, "error": "reason_required"}
+
+    path = db_path or settings.db_path
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        row = conn.execute(
+            "SELECT id, status FROM reservations WHERE id = ?",
+            (reservation_id,),
+        ).fetchone()
+
+        if row is None:
+            conn.rollback()
+            return {"success": False, "error": "not_found"}
+
+        if row["status"] != "pending":
+            conn.rollback()
+            return {"success": False, "error": "already_decided",
+                    "current_status": row["status"]}
+
+        conn.execute(
+            """
+            UPDATE reservations
+            SET status      = 'rejected',
+                admin_notes = ?,
+                decided_at  = strftime('%Y-%m-%d %H:%M:%S','now'),
+                decided_by  = ?
+            WHERE id = ?
+            """,
+            (reason.strip(), admin_id, reservation_id),
+        )
+        conn.commit()
+
+        logger.info(
+            "Reservation %d rejected by %s. Reason: %s",
+            reservation_id, admin_id, reason,
+        )
+        return {"success": True, "error": None}
+
+    except sqlite3.Error:
+        conn.rollback()
+        logger.exception("reject_reservation DB error for id=%d", reservation_id)
+        return {"success": False, "error": "db_error"}
+    finally:
+        conn.close()

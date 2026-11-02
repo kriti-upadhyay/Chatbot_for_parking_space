@@ -42,6 +42,74 @@ logger = get_logger(__name__)
 # Guardrail node
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Status check node (Stage 2)
+# ---------------------------------------------------------------------------
+
+def status_check_node(state: ConversationState) -> dict:
+    """
+    Check whether the admin has decided on the user's pending reservation.
+
+    Runs on every turn BEFORE the guardrail so the user is notified as
+    soon as they send any message after a decision is made.
+
+    Notification is delivered exactly once — after delivery,
+    ``pending_reservation_id`` is cleared to None.
+
+    Returns an empty dict (no changes) if:
+    - there is no pending reservation being tracked, or
+    - the reservation is still pending (no decision yet).
+    """
+    rid = state.get("pending_reservation_id")
+    if rid is None:
+        # Reset intent so a stale value from the previous turn never persists.
+        return {"intent": None}
+
+    from src.database.queries import get_reservation_status
+
+    status_info = get_reservation_status(rid)
+    if status_info is None or status_info["status"] == "pending":
+        return {"intent": None}
+
+    status   = status_info["status"]
+    notes    = status_info.get("admin_notes") or ""
+    decided_by = status_info.get("decided_by") or "the administrator"
+
+    if status == "confirmed":
+        notification = (
+            f"✅ **Good news!** Your reservation (#{rid}) has been "
+            f"**approved** by {decided_by}.\n"
+            + (f"Note from administrator: {notes}\n" if notes else "")
+            + "You can proceed to CityPark on your reserved date."
+        )
+    elif status == "rejected":
+        notification = (
+            f"❌ We're sorry — your reservation (#{rid}) has been "
+            f"**declined** by {decided_by}.\n"
+            + (f"Reason: {notes}\n" if notes else "")
+            + "Please contact CityPark on 0800 123 4567 if you have questions."
+        )
+    else:
+        # cancelled / expired — inform but don't treat as pending any more
+        notification = (
+            f"ℹ️ Your reservation (#{rid}) is no longer active "
+            f"(status: {status}). "
+            "Please contact CityPark on 0800 123 4567 for assistance."
+        )
+
+    logger.info(
+        "Delivering one-time status notification for reservation %d: %s",
+        rid, status,
+    )
+
+    return {
+        "pending_reservation_id": None,    # clear — notification delivered once
+        "intent": "status_notified",       # signal to router → go to END
+        "response": notification,
+        "messages": [AIMessage(content=notification)],
+    }
+
+
 def guardrail_node(state: ConversationState) -> dict:
     """
     Input safety gate — runs on every user message before routing.
@@ -338,19 +406,67 @@ def reservation_node(state: ConversationState) -> dict:
 
     # ── Initialise flow ──────────────────────────────────────────────────────
     if intent == "reservation" and not state.get("reservation_active"):
-        first_field = RESERVATION_FIELDS[0]
-        greeting = (
-            "I'd be happy to help you reserve a parking space at CityPark!\n\n"
-            + FIELD_PROMPTS[first_field]
-        )
-        return {
-            "response": greeting,
-            "reservation": {},
-            "reservation_active": True,
-            "next_field_to_ask": first_field,
-            "validation_errors": [],
-            "messages": [AIMessage(content=greeting)],
-        }
+        # Try to extract fields from the opening message before asking anything.
+        from src.chatbot.extractor import extract_reservation_fields
+        prefilled = extract_reservation_fields(user_input)
+
+        # For vehicle_type we can pre-fill from extraction, but we still need to
+        # validate it against live DB availability before accepting it.  If the
+        # extracted type has no spaces, treat it as absent so the menu is shown.
+        if "vehicle_type" in prefilled:
+            from src.database.queries import get_available_vehicle_types
+            available_types = {t["vehicle_type"] for t in get_available_vehicle_types()
+                               if t["available_spaces"] > 0}
+            if prefilled["vehicle_type"] not in available_types:
+                prefilled.pop("vehicle_type")
+
+        first_missing = _next_missing_field(prefilled)
+
+        if first_missing is None:
+            # All fields already provided and valid — go straight to the save step.
+            # Fall through to the field-processing block by treating this turn as if
+            # the user just answered the last field.  We do this by setting up state
+            # and letting the existing save logic below handle it.
+            reservation = prefilled
+            upcoming = _next_missing_field(reservation)
+            # upcoming is None, so we will proceed directly to the DB save below.
+            # Merge into local variables so the "Process a field answer" block runs.
+            next_field = "__save__"  # sentinel that skips field validation below
+        else:
+            if prefilled:
+                greeting_intro = "I'd be happy to help! I've captured some of your details."
+            else:
+                greeting_intro = "I'd be happy to help you reserve a parking space at CityPark!"
+
+            if first_missing == "vehicle_type":
+                menu_text, available = _build_vehicle_type_menu()
+                if not available:
+                    return {
+                        "response": menu_text,
+                        "reservation": prefilled,
+                        "reservation_active": False,
+                        "next_field_to_ask": None,
+                        "validation_errors": ["no_capacity"],
+                        "messages": [AIMessage(content=menu_text)],
+                    }
+                greeting = f"{greeting_intro}\n\n{menu_text}"
+            else:
+                greeting = f"{greeting_intro}\n\n{FIELD_PROMPTS[first_missing]}"
+
+            return {
+                "response": greeting,
+                "reservation": prefilled,
+                "reservation_active": True,
+                "next_field_to_ask": first_missing,
+                "validation_errors": [],
+                "messages": [AIMessage(content=greeting)],
+            }
+
+        # ── All fields extracted upfront — go directly to save ───────────────
+        # Skip the field-collection block below by falling through with the
+        # complete reservation dict and next_field = None.
+        reservation = prefilled
+        next_field = None
 
     # ── Process a field answer ───────────────────────────────────────────────
     if next_field:
@@ -491,13 +607,15 @@ def reservation_node(state: ConversationState) -> dict:
         )
 
         if save_result["success"]:
-            confirmation = _build_confirmation(reservation, save_result["reservation_id"])
+            rid = save_result["reservation_id"]
+            confirmation = _build_confirmation(reservation, rid)
             return {
                 "response": confirmation,
                 "reservation": reservation,
                 "reservation_active": False,
                 "next_field_to_ask": None,
                 "validation_errors": [],
+                "pending_reservation_id": rid,   # tracked for status polling
                 "messages": [AIMessage(content=confirmation)],
             }
 
@@ -538,6 +656,77 @@ def reservation_node(state: ConversationState) -> dict:
             }
 
         # Generic DB / unexpected error
+        reply = (
+            "I'm sorry, your reservation could not be saved due to a system error. "
+            "Please try again or contact customer services on 0800 123 4567."
+        )
+        return {
+            "response": reply,
+            "reservation": reservation,
+            "reservation_active": False,
+            "next_field_to_ask": None,
+            "validation_errors": [error_code],
+            "messages": [AIMessage(content=reply)],
+        }
+
+    # ── Upfront-extraction path: all 6 fields captured in opening message ────
+    # Reached when the init block pre-filled all fields (next_field=None) and
+    # the reservation dict is complete.  Mirrors the save logic inside the
+    # field-collection block above.
+    if reservation and _next_missing_field(reservation) is None:
+        from src.database.queries import save_reservation as _save
+
+        save_result = _save(
+            first_name=reservation["first_name"],
+            surname=reservation["surname"],
+            vehicle_type=reservation["vehicle_type"],
+            vehicle_reg=reservation["vehicle_reg"],
+            start_datetime=reservation["start_datetime"],
+            end_datetime=reservation["end_datetime"],
+        )
+        if save_result["success"]:
+            rid = save_result["reservation_id"]
+            confirmation = _build_confirmation(reservation, rid)
+            return {
+                "response": confirmation,
+                "reservation": reservation,
+                "reservation_active": False,
+                "next_field_to_ask": None,
+                "validation_errors": [],
+                "pending_reservation_id": rid,
+                "messages": [AIMessage(content=confirmation)],
+            }
+
+        error_code = save_result.get("error", "db_error")
+        if error_code == "capacity_exceeded":
+            menu_text, available = _build_vehicle_type_menu()
+            reply = (
+                "Sorry, the selected vehicle type is no longer available.\n\n"
+                + (menu_text if available else "The car park is now completely full.")
+            )
+            reservation.pop("vehicle_type", None)
+            return {
+                "response": reply,
+                "reservation": reservation,
+                "reservation_active": bool(available),
+                "next_field_to_ask": "vehicle_type" if available else None,
+                "validation_errors": ["capacity_exceeded"],
+                "messages": [AIMessage(content=reply)],
+            }
+        if error_code == "duplicate_reservation":
+            reply = (
+                f"A reservation for vehicle {reservation.get('vehicle_reg')} "
+                "already exists that overlaps with the times you requested. "
+                "Please choose different dates or contact customer services on 0800 123 4567."
+            )
+            return {
+                "response": reply,
+                "reservation": reservation,
+                "reservation_active": False,
+                "next_field_to_ask": None,
+                "validation_errors": ["duplicate_reservation"],
+                "messages": [AIMessage(content=reply)],
+            }
         reply = (
             "I'm sorry, your reservation could not be saved due to a system error. "
             "Please try again or contact customer services on 0800 123 4567."

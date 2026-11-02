@@ -67,8 +67,31 @@ def classify_intent(user_input: str, reservation_active: bool = False) -> str:
         return INTENT_RESERVATION
 
     if any(kw in text for kw in _DYNAMIC_KEYWORDS):
+        # Before committing to dynamic_info, check whether this looks more like
+        # a complete booking request (e.g. "I want a standard spot on 3 Nov for
+        # 3 hours" — "hours" hits dynamic keywords, but the message contains
+        # multiple reservation fields).  Two or more extracted fields is a strong
+        # signal that the user is booking, not asking a general question.
+        try:
+            from src.chatbot.extractor import extract_reservation_fields
+            if len(extract_reservation_fields(user_input)) >= 2:
+                logger.debug("Intent: reservation (extractor override of dynamic_info)")
+                return INTENT_RESERVATION
+        except Exception:
+            pass  # extractor failure → keep original dynamic_info classification
         logger.debug("Intent: dynamic_info (keyword match)")
         return INTENT_DYNAMIC_INFO
+
+    # Last-chance check: if the extractor identifies 2+ reservation fields in a
+    # message that had no keyword match at all, treat it as a booking request.
+    # This catches phrasing like "I need a standard parking spot, reg AB12 CDE."
+    try:
+        from src.chatbot.extractor import extract_reservation_fields
+        if len(extract_reservation_fields(user_input)) >= 2:
+            logger.debug("Intent: reservation (extractor, no keyword match)")
+            return INTENT_RESERVATION
+    except Exception:
+        pass
 
     logger.debug("Intent: general_faq (default)")
     return INTENT_GENERAL_FAQ

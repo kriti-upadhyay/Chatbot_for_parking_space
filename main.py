@@ -61,10 +61,21 @@ def cmd_chat() -> None:
         if not user_input:
             continue
 
+        prev_rid = state.get("pending_reservation_id")
         state = graph.invoke({**state, "user_input": user_input})
         response = state.get("response", "")
         if response:
             print(f"\nBot: {response}\n")
+
+        # Stage 4: start workflow if a reservation was just saved
+        new_rid = state.get("pending_reservation_id")
+        if new_rid and new_rid != prev_rid:
+            try:
+                from src.workflow.graph import start_reservation_workflow
+                start_reservation_workflow(new_rid, state.get("reservation", {}))
+                logger.info("Workflow started for reservation %d.", new_rid)
+            except Exception as wf_exc:
+                logger.warning("Could not start workflow for reservation %d: %s", new_rid, wf_exc)
 
 
 def cmd_evaluate() -> None:
