@@ -71,6 +71,10 @@ def _init():
     st.session_state.graph = None
     st.session_state.graph_error = None
     st.session_state.ready = True
+    # Admin panel state (not set here — defaults to False/absent)
+    # st.session_state.show_admin_panel: bool
+    # st.session_state.admin_authenticated: bool
+    # st.session_state.admin_id: str
 
 
 @st.cache_resource(show_spinner=False)
@@ -129,12 +133,175 @@ def _render_sidebar():
             st.rerun()
 
         st.caption("Stage 2 · RAG + LangGraph · Groq API")
-        st.divider()
-        st.markdown(
-            "**Administrator?** Open the "
-            "[Admin Dashboard](http://localhost:8502) "
-            "to review pending reservations."
+
+
+# ── Top bar — Admin button always visible at the top of the main area ────────
+
+def _render_top_bar() -> None:
+    """
+    Render a one-line bar at the very top of the main page containing the
+    Admin Panel button (or a Back-to-chat button when admin view is active).
+    Stays at the top regardless of chat history length.
+    """
+    _, right = st.columns([5, 1])
+    with right:
+        if st.session_state.get("show_admin_panel"):
+            if st.button("← Chat", use_container_width=True,
+                         help="Return to the user chatbot"):
+                for key in ("admin_authenticated", "admin_id", "show_admin_panel"):
+                    st.session_state.pop(key, None)
+                st.rerun()
+        else:
+            if st.button("🔐 Admin", use_container_width=True,
+                         help="Open the administrator dashboard"):
+                st.session_state.show_admin_panel = True
+                st.rerun()
+
+
+# ── Inline admin panel ───────────────────────────────────────────────────────
+
+def _render_admin_login() -> bool:
+    """
+    Show the admin login form inside the user portal.
+
+    Returns True if the admin is already authenticated (or just logged in).
+    Reads the password from ADMIN_PASSWORD env var via verify_admin_password().
+    The password is never displayed or stored beyond the form submit.
+    """
+    from src.admin.auth import is_admin_configured, verify_admin_password
+
+    if st.session_state.get("admin_authenticated"):
+        return True
+
+    st.subheader("🔐 Administrator Login")
+
+    if not is_admin_configured():
+        st.error(
+            "⚠️ `ADMIN_PASSWORD` is not configured.  "
+            "Set it in your `.env` file and restart the app."
         )
+        return False
+
+    with st.form("admin_login_inline"):
+        pwd = st.text_input("Admin password", type="password",
+                            placeholder="Enter admin password")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            submitted = st.form_submit_button("Log in", use_container_width=True,
+                                              type="primary")
+        with col_b:
+            cancel = st.form_submit_button("← Back to chat", use_container_width=True)
+
+    if cancel:
+        st.session_state.show_admin_panel = False
+        st.rerun()
+
+    if submitted:
+        if verify_admin_password(pwd):
+            st.session_state.admin_authenticated = True
+            st.session_state.admin_id = "admin"
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+    return False
+
+
+def _render_admin_panel() -> None:
+    """
+    Render the full admin dashboard inside the user portal.
+
+    Reuses render_reservations() from the shared dashboard module so the
+    approval/export logic is never duplicated.
+    """
+    from src.admin.dashboard import render_reservations
+
+    admin_id = st.session_state.get("admin_id", "admin")
+
+    col_title, col_logout = st.columns([4, 1])
+    with col_title:
+        st.title("🔐 CityPark Admin Dashboard")
+        st.caption(f"Logged in as: **{admin_id}**")
+    with col_logout:
+        st.write("")  # vertical alignment
+        if st.button("🚪 Log out / Back to chat", use_container_width=True):
+            for key in ("admin_authenticated", "admin_id", "show_admin_panel"):
+                st.session_state.pop(key, None)
+            st.rerun()
+
+    render_reservations(admin_id)
+
+
+# ── Reservation status auto-poll ─────────────────────────────────────────────
+
+@st.fragment(run_every=3)
+def _poll_reservation_status():
+    """
+    Poll the database every 3 seconds for an admin decision on the user's
+    pending reservation.  When a decision arrives, inject a notification
+    message into the chat history and clear the tracked reservation ID so
+    the poll stops and the notification is not repeated.
+
+    Uses the existing get_reservation_status() query — the database is
+    always the source of truth.  Does nothing when there is no pending
+    reservation or the status is still 'pending'.
+    """
+    rid = st.session_state.conv_state.get("pending_reservation_id")
+    if rid is None:
+        return
+
+    # Guard against re-delivering the same notification on page reload.
+    notified = st.session_state.setdefault("notified_rids", set())
+    if rid in notified:
+        st.session_state.conv_state = {
+            **st.session_state.conv_state,
+            "pending_reservation_id": None,
+        }
+        return
+
+    try:
+        from src.database.queries import get_reservation_status
+        status_info = get_reservation_status(rid)
+    except Exception:
+        return  # DB unavailable — retry next cycle
+
+    if status_info is None or status_info["status"] == "pending":
+        return  # still waiting
+
+    status     = status_info["status"]
+    notes      = status_info.get("admin_notes") or ""
+    decided_by = status_info.get("decided_by") or "the administrator"
+
+    if status == "confirmed":
+        notification = (
+            f"✅ **Good news!** Your reservation (#{rid}) has been "
+            f"**approved** by {decided_by}.\n"
+            + (f"Note from administrator: {notes}\n" if notes else "")
+            + "You can proceed to CityPark on your reserved date."
+        )
+    elif status == "rejected":
+        notification = (
+            f"❌ We're sorry — your reservation (#{rid}) has been "
+            f"**declined** by {decided_by}.\n"
+            + (f"Reason: {notes}\n" if notes else "")
+            + "Please contact CityPark on 0800 123 4567 if you have questions."
+        )
+    else:
+        notification = (
+            f"ℹ️ Your reservation (#{rid}) is no longer active "
+            f"(status: {status}). "
+            "Please contact CityPark on 0800 123 4567 for assistance."
+        )
+
+    # Push notification into chat history and clear the pending ID.
+    st.session_state.messages.append({"role": "assistant", "content": notification})
+    st.session_state.conv_state = {
+        **st.session_state.conv_state,
+        "pending_reservation_id": None,
+    }
+    notified.add(rid)
+    logger.info("Auto-poll delivered status notification for reservation %d: %s", rid, status)
+    st.rerun()
 
 
 # ── Main chat area ────────────────────────────────────────────────────────────
@@ -176,11 +343,27 @@ def _render_chat():
 
         # Run one turn through the graph
         try:
+            prev_rid = st.session_state.conv_state.get("pending_reservation_id")
             new_state = graph.invoke(
                 {**st.session_state.conv_state, "user_input": user_input}
             )
             st.session_state.conv_state = new_state
             response = new_state.get("response", "")
+
+            # Stage 4: if a reservation was just saved this turn, start its workflow
+            new_rid = new_state.get("pending_reservation_id")
+            if new_rid and new_rid != prev_rid:
+                try:
+                    from src.workflow.graph import start_reservation_workflow
+                    start_reservation_workflow(
+                        new_rid,
+                        new_state.get("reservation", {}),
+                    )
+                    logger.info("Workflow started for reservation %d.", new_rid)
+                except Exception as wf_exc:
+                    logger.exception(
+                        "Failed to start workflow for reservation %d", new_rid
+                    )
         except Exception as exc:
             logger.exception("Graph invocation failed")
             response = (
@@ -201,4 +384,13 @@ def _render_chat():
 
 _init()
 _render_sidebar()
-_render_chat()
+_render_top_bar()   # Admin button always at the top of the main area
+
+if st.session_state.get("show_admin_panel"):
+    # ── Admin panel view ─────────────────────────────────────────────────────
+    if _render_admin_login():
+        _render_admin_panel()
+else:
+    # ── Normal user chat view ────────────────────────────────────────────────
+    _poll_reservation_status()   # auto-refresh every 3 s when a reservation is pending
+    _render_chat()
