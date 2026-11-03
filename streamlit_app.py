@@ -128,7 +128,13 @@ def _render_sidebar():
             st.session_state.conv_state = empty_state()
             st.rerun()
 
-        st.caption("Stage 1 · RAG + LangGraph · Groq API")
+        st.caption("Stage 2 · RAG + LangGraph · Groq API")
+        st.divider()
+        st.markdown(
+            "**Administrator?** Open the "
+            "[Admin Dashboard](http://localhost:8502) "
+            "to review pending reservations."
+        )
 
 
 # ── Main chat area ────────────────────────────────────────────────────────────

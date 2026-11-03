@@ -28,6 +28,11 @@ class ConversationState(TypedDict):
     next_field_to_ask: str | None  # next field the bot should prompt for
     validation_errors: list[str]   # errors from the previous field attempt
 
+    # ── Stage 2: pending reservation tracking ───────────────────────────────
+    # Set to the DB id after a successful save; cleared once the admin
+    # decision has been delivered to the user (exactly once).
+    pending_reservation_id: int | None
+
 
 # Ordered list of reservation fields the bot collects.
 RESERVATION_FIELDS: list[str] = [
@@ -74,4 +79,5 @@ def empty_state() -> ConversationState:
         reservation_active=False,
         next_field_to_ask=None,
         validation_errors=[],
+        pending_reservation_id=None,
     )
